@@ -118,6 +118,14 @@ type Model struct {
 	selectedEpisode *apiutils.Episode
 	selectedStream  *apiutils.AlcSearchResult
 
+	// Store all items for manual filtering
+	allEpisodeItems []list.Item
+	allStreamItems  []list.Item
+
+	// Custom filter state
+	filterInput textinput.Model
+	isFiltering bool
+
 	// Download state
 	downloading  bool
 	downloadProg float64
@@ -184,25 +192,35 @@ func NewModel() Model {
 	episodesList := list.New([]list.Item{}, createDelegate(), 0, 0)
 	episodesList.Title = "Select Episode"
 	episodesList.SetShowStatusBar(false)
-	episodesList.SetFilteringEnabled(true)
+	episodesList.SetFilteringEnabled(false)
 	episodesList.Styles.Title = TitleStyle.Padding(0, 0, 1, 2)
 
 	// Streams list
 	streamsList := list.New([]list.Item{}, createDelegate(), 0, 0)
 	streamsList.Title = "Available Streams"
 	streamsList.SetShowStatusBar(true)
-	streamsList.SetFilteringEnabled(true)
+	streamsList.SetFilteringEnabled(false)
 	streamsList.Styles.Title = TitleStyle.Padding(0, 0, 1, 2)
+
+	// Filter input for episodes/streams
+	fi := textinput.New()
+	fi.Placeholder = "Filter..."
+	fi.Width = 30
+	fi.Prompt = "/ "
+	fi.PromptStyle = SelectedStyle
+	fi.TextStyle = NormalStyle
+	fi.PlaceholderStyle = DimStyle
 
 	return Model{
 		view:         SearchView,
 		searchInput:  ti,
+		filterInput:  fi,
 		resultsList:  resultsList,
 		seasonsList:  seasonsList,
 		episodesList: episodesList,
 		streamsList:  streamsList,
 		spinner:      sp,
-		progress:    prog,
+		progress:     prog,
 	}
 }
 
@@ -232,11 +250,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.view == SearchView && !m.searchInput.Focused() {
 				return m, tea.Quit
 			}
-			// Don't quit if filtering in any list
-			if m.view == StreamsView && m.streamsList.FilterState() == list.Filtering {
-				break
-			}
-			if m.view == EpisodesView && m.episodesList.FilterState() == list.Filtering {
+			// Don't quit if filtering
+			if m.isFiltering {
 				break
 			}
 			if m.view != SearchView {
@@ -308,8 +323,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, r := range msg.results {
 			items[i] = streamItem{result: r}
 		}
+		m.allStreamItems = items // Store for filtering
 		m.streamsList.SetItems(items)
 		m.view = StreamsView
+		m.isFiltering = false
+		m.filterInput.SetValue("")
 		m.errorMsg = ""
 		return m, nil
 
@@ -343,8 +361,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, r := range msg.results {
 			items[i] = episodeItem{result: r}
 		}
+		m.allEpisodeItems = items // Store for filtering
 		m.episodesList.SetItems(items)
 		m.view = EpisodesView
+		m.isFiltering = false
+		m.filterInput.SetValue("")
 		m.errorMsg = ""
 		return m, nil
 
@@ -451,15 +472,54 @@ func (m Model) updateSeasonsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateEpisodesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Don't handle shortcuts when filtering
-	if m.episodesList.FilterState() == list.Filtering {
-		var cmd tea.Cmd
-		m.episodesList, cmd = m.episodesList.Update(msg)
-		return m, cmd
+	// Handle filter mode
+	if m.isFiltering {
+		switch msg.String() {
+		case "esc":
+			// Cancel filtering, restore all items
+			m.isFiltering = false
+			m.filterInput.Blur()
+			m.filterInput.SetValue("")
+			m.episodesList.SetItems(m.allEpisodeItems)
+			return m, nil
+		case "enter":
+			// Exit filter mode, keep filtered results
+			m.isFiltering = false
+			m.filterInput.Blur()
+			return m, nil
+		default:
+			// Update filter input and filter items
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+
+			// Apply filter
+			filterText := strings.ToLower(m.filterInput.Value())
+			if filterText == "" {
+				m.episodesList.SetItems(m.allEpisodeItems)
+			} else {
+				var filtered []list.Item
+				for _, item := range m.allEpisodeItems {
+					if strings.Contains(strings.ToLower(item.FilterValue()), filterText) {
+						filtered = append(filtered, item)
+					}
+				}
+				m.episodesList.SetItems(filtered)
+			}
+			return m, cmd
+		}
 	}
 
+	// Normal mode
 	switch msg.String() {
+	case "/":
+		// Enter filter mode
+		m.isFiltering = true
+		m.filterInput.SetValue("")
+		m.filterInput.Focus()
+		return m, textinput.Blink
 	case "esc":
+		// Reset filter state for episodes view
+		m.episodesList.SetItems(m.allEpisodeItems)
 		m.view = SeasonsView
 		return m, nil
 	case "enter":
@@ -480,14 +540,51 @@ func (m Model) updateEpisodesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Don't handle shortcuts when filtering
-	if m.streamsList.FilterState() == list.Filtering {
-		var cmd tea.Cmd
-		m.streamsList, cmd = m.streamsList.Update(msg)
-		return m, cmd
+	// Handle filter mode
+	if m.isFiltering {
+		switch msg.String() {
+		case "esc":
+			// Cancel filtering, restore all items
+			m.isFiltering = false
+			m.filterInput.Blur()
+			m.filterInput.SetValue("")
+			m.streamsList.SetItems(m.allStreamItems)
+			return m, nil
+		case "enter":
+			// Exit filter mode, keep filtered results
+			m.isFiltering = false
+			m.filterInput.Blur()
+			return m, nil
+		default:
+			// Update filter input and filter items
+			var cmd tea.Cmd
+			m.filterInput, cmd = m.filterInput.Update(msg)
+
+			// Apply filter
+			filterText := strings.ToLower(m.filterInput.Value())
+			if filterText == "" {
+				m.streamsList.SetItems(m.allStreamItems)
+			} else {
+				var filtered []list.Item
+				for _, item := range m.allStreamItems {
+					if strings.Contains(strings.ToLower(item.FilterValue()), filterText) {
+						filtered = append(filtered, item)
+					}
+				}
+				m.streamsList.SetItems(filtered)
+			}
+			return m, cmd
+		}
 	}
 
+	// Normal mode
 	switch msg.String() {
+	case "/":
+		// Enter filter mode
+		m.isFiltering = true
+		m.filterInput.SetValue("")
+		m.filterInput.Focus()
+		return m, textinput.Blink
 	case "esc":
 		// Go back to episodes if watching a series, otherwise results
 		if m.selectedEpisode != nil {
@@ -495,6 +592,8 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.view = ResultsView
 		}
+		// Reset filter state for streams view
+		m.streamsList.SetItems(m.allStreamItems)
 		m.statusMsg = ""
 		m.errorMsg = ""
 		return m, nil

@@ -109,6 +109,11 @@ func (m Model) episodesView() string {
 		b.WriteString(titleInfo + "\n")
 	}
 
+	// Show filter input when filtering
+	if m.isFiltering {
+		b.WriteString(InputStyle.Render(m.filterInput.View()) + "\n")
+	}
+
 	b.WriteString(m.episodesList.View())
 	b.WriteString("\n")
 
@@ -116,7 +121,12 @@ func (m Model) episodesView() string {
 		b.WriteString(ErrorStyle.Render(m.errorMsg) + "\n")
 	}
 
-	help := HelpStyle.Render("enter: select • /: filter • esc: back • j/k: navigate • q: quit")
+	var help string
+	if m.isFiltering {
+		help = HelpStyle.Render("enter: apply filter • esc: cancel filter")
+	} else {
+		help = HelpStyle.Render("enter: select • /: filter • esc: back • j/k: navigate • q: quit")
+	}
 	b.WriteString(help)
 
 	return b.String()
@@ -149,6 +159,11 @@ func (m Model) streamsView() string {
 		b.WriteString(DimStyle.Render(titleInfo) + "\n")
 	}
 
+	// Show filter input when filtering
+	if m.isFiltering {
+		b.WriteString(InputStyle.Render(m.filterInput.View()) + "\n")
+	}
+
 	b.WriteString(m.streamsList.View())
 	b.WriteString("\n")
 
@@ -160,7 +175,12 @@ func (m Model) streamsView() string {
 		b.WriteString(ErrorStyle.Render(m.errorMsg) + "\n")
 	}
 
-	help := HelpStyle.Render("p/enter: play • d: download • /: filter • esc: back • q: quit")
+	var help string
+	if m.isFiltering {
+		help = HelpStyle.Render("enter: apply filter • esc: cancel filter")
+	} else {
+		help = HelpStyle.Render("p/enter: play • d: download • /: filter • esc: back • q: quit")
+	}
 	b.WriteString(help)
 
 	return b.String()
