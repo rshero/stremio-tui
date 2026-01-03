@@ -21,8 +21,33 @@ const (
 	SeasonsView
 	EpisodesView
 	StreamsView
-	DownloadView
 )
+
+type Tab int
+
+const (
+	MainTab Tab = iota
+	DownloadsTab
+)
+
+type DownloadStatus int
+
+const (
+	DownloadPending DownloadStatus = iota
+	DownloadInProgress
+	DownloadComplete
+	DownloadFailed
+)
+
+type Download struct {
+	ID       int
+	Name     string
+	Filename string
+	URL      string
+	Progress float64
+	Status   DownloadStatus
+	Error    error
+}
 
 // List item implementations
 type imdbItem struct {
@@ -100,6 +125,7 @@ func (i episodeItem) FilterValue() string {
 // Main model
 type Model struct {
 	view        View
+	currentTab  Tab
 	searchInput textinput.Model
 	resultsList list.Model
 	seasonsList list.Model
@@ -126,11 +152,9 @@ type Model struct {
 	filterInput textinput.Model
 	isFiltering bool
 
-	// Download state
-	downloading  bool
-	downloadProg float64
-	downloadFile string
-	downloadErr  error
+	// Downloads tracking
+	downloads      []Download
+	nextDownloadID int
 
 	// Loading states
 	loading    bool
@@ -213,6 +237,7 @@ func NewModel() Model {
 
 	return Model{
 		view:         SearchView,
+		currentTab:   MainTab,
 		searchInput:  ti,
 		filterInput:  fi,
 		resultsList:  resultsList,
@@ -221,6 +246,7 @@ func NewModel() Model {
 		streamsList:  streamsList,
 		spinner:      sp,
 		progress:     prog,
+		downloads:    []Download{},
 	}
 }
 
@@ -246,7 +272,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "tab":
+			// Cycle between tabs (don't switch if filtering or loading)
+			if !m.isFiltering && !m.loading {
+				if m.currentTab == MainTab {
+					m.currentTab = DownloadsTab
+				} else {
+					m.currentTab = MainTab
+				}
+				return m, nil
+			}
 		case "q":
+			if m.currentTab == DownloadsTab {
+				m.currentTab = MainTab
+				return m, nil
+			}
 			if m.view == SearchView && !m.searchInput.Focused() {
 				return m, tea.Quit
 			}
@@ -259,20 +299,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// View-specific handling
-		switch m.view {
-		case SearchView:
-			return m.updateSearchView(msg)
-		case ResultsView:
-			return m.updateResultsView(msg)
-		case SeasonsView:
-			return m.updateSeasonsView(msg)
-		case EpisodesView:
-			return m.updateEpisodesView(msg)
-		case StreamsView:
-			return m.updateStreamsView(msg)
-		case DownloadView:
-			return m.updateDownloadView(msg)
+		// Only process view-specific keys on Main tab
+		if m.currentTab == MainTab {
+			switch m.view {
+			case SearchView:
+				return m.updateSearchView(msg)
+			case ResultsView:
+				return m.updateResultsView(msg)
+			case SeasonsView:
+				return m.updateSeasonsView(msg)
+			case EpisodesView:
+				return m.updateEpisodesView(msg)
+			case StreamsView:
+				return m.updateStreamsView(msg)
+			}
 		}
 
 	case spinner.TickMsg:
@@ -283,7 +323,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case progress.FrameMsg:
-		if m.downloading {
+		// Update progress model if there are active downloads
+		if m.activeDownloadCount() > 0 {
 			progressModel, cmd := m.progress.Update(msg)
 			m.progress = progressModel.(progress.Model)
 			cmds = append(cmds, cmd)
@@ -370,19 +411,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case downloadProgressMsg:
-		m.downloadProg = msg.progress
-		return m, m.progress.SetPercent(msg.progress)
+		// Update progress for specific download
+		for i := range m.downloads {
+			if m.downloads[i].ID == msg.id {
+				m.downloads[i].Progress = msg.progress
+				m.downloads[i].Status = DownloadInProgress
+				break
+			}
+		}
+		return m, nil
 
 	case downloadCompleteMsg:
-		m.downloading = false
-		m.downloadProg = 1.0
-		if msg.err != nil {
-			m.downloadErr = msg.err
-			m.errorMsg = "Download failed: " + msg.err.Error()
-		} else {
-			m.statusMsg = "Downloaded: " + msg.filename
+		// Update status for specific download
+		for i := range m.downloads {
+			if m.downloads[i].ID == msg.id {
+				if msg.err != nil {
+					m.downloads[i].Status = DownloadFailed
+					m.downloads[i].Error = msg.err
+				} else {
+					m.downloads[i].Progress = 1.0
+					m.downloads[i].Status = DownloadComplete
+					m.downloads[i].Filename = msg.filename
+				}
+				break
+			}
 		}
-		m.view = StreamsView
 		return m, nil
 
 	case mpvLaunchedMsg:
@@ -606,9 +659,6 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		if item, ok := m.streamsList.SelectedItem().(streamItem); ok {
-			m.selectedStream = &item.result
-			m.downloading = true
-			m.downloadProg = 0
 			// Use filename from API if available, otherwise sanitize the name
 			var filename string
 			if item.result.BehaviorHints.Filename != "" {
@@ -616,11 +666,25 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				filename = sanitizeFilename(item.result.Name)
 			}
-			m.downloadFile = "downloads/" + filename
-			m.view = DownloadView
-			m.statusMsg = ""
+			filepath := "downloads/" + filename
+
+			// Add to downloads list
+			download := Download{
+				ID:       m.nextDownloadID,
+				Name:     item.result.Name,
+				Filename: filepath,
+				URL:      item.result.Url,
+				Progress: 0,
+				Status:   DownloadPending,
+			}
+			m.downloads = append(m.downloads, download)
+			m.nextDownloadID++
+
+			m.statusMsg = "Download started - press Tab to view progress"
 			m.errorMsg = ""
-			return m, downloadStream(item.result.Url, m.downloadFile)
+
+			// Start download in background with progress reporting
+			return m, downloadStreamWithProgress(download.ID, item.result.Url, filepath)
 		}
 	}
 
@@ -629,33 +693,42 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) updateDownloadView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		// TODO: Cancel download
-		m.downloading = false
-		m.view = StreamsView
-		return m, nil
+func (m Model) View() string {
+	var content string
+
+	// Show downloads tab or main content
+	if m.currentTab == DownloadsTab {
+		content = m.downloadsPageView()
+	} else {
+		switch m.view {
+		case SearchView:
+			content = m.searchView()
+		case ResultsView:
+			content = m.resultsView()
+		case SeasonsView:
+			content = m.seasonsView()
+		case EpisodesView:
+			content = m.episodesView()
+		case StreamsView:
+			content = m.streamsView()
+		}
 	}
-	return m, nil
+
+	// Add tab bar at the bottom
+	tabBar := m.renderTabBar()
+
+	return content + "\n" + tabBar
 }
 
-func (m Model) View() string {
-	switch m.view {
-	case SearchView:
-		return m.searchView()
-	case ResultsView:
-		return m.resultsView()
-	case SeasonsView:
-		return m.seasonsView()
-	case EpisodesView:
-		return m.episodesView()
-	case StreamsView:
-		return m.streamsView()
-	case DownloadView:
-		return m.downloadView()
+// Helper to count active downloads
+func (m Model) activeDownloadCount() int {
+	count := 0
+	for _, d := range m.downloads {
+		if d.Status == DownloadPending || d.Status == DownloadInProgress {
+			count++
+		}
 	}
-	return ""
+	return count
 }
 
 func sanitizeFilename(name string) string {

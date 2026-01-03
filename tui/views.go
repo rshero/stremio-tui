@@ -186,33 +186,96 @@ func (m Model) streamsView() string {
 	return b.String()
 }
 
-func (m Model) downloadView() string {
+func (m Model) renderTabBar() string {
+	var mainTab, downloadsTab string
+
+	// Count active downloads for badge
+	activeCount := m.activeDownloadCount()
+	downloadsLabel := "Downloads"
+	if activeCount > 0 {
+		downloadsLabel = fmt.Sprintf("Downloads (%d)", activeCount)
+	} else if len(m.downloads) > 0 {
+		downloadsLabel = fmt.Sprintf("Downloads (%d)", len(m.downloads))
+	}
+
+	if m.currentTab == MainTab {
+		mainTab = TabActiveStyle.Render("Main")
+		downloadsTab = TabInactiveStyle.Render(downloadsLabel)
+	} else {
+		mainTab = TabInactiveStyle.Render("Main")
+		downloadsTab = TabActiveStyle.Render(downloadsLabel)
+	}
+
+	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, mainTab, " ", downloadsTab)
+	help := HelpStyle.Render("  tab: switch • q: back/quit • ctrl+c: quit")
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, tabBar, help)
+}
+
+func (m Model) downloadsPageView() string {
 	var b strings.Builder
 
-	title := TitleStyle.Render("Downloading...")
+	title := TitleStyle.Render("Downloads")
 	b.WriteString(title + "\n\n")
 
-	if m.downloadFile != "" {
-		b.WriteString(DimStyle.Render("File: "+m.downloadFile) + "\n\n")
+	if len(m.downloads) == 0 {
+		b.WriteString(DimStyle.Render("No downloads yet. Press 'd' on a stream to start downloading.") + "\n")
+	} else {
+		for _, d := range m.downloads {
+			b.WriteString(m.renderDownloadItem(d))
+		}
 	}
 
-	// Progress bar
-	prog := m.progress.View()
-	b.WriteString(prog + "\n\n")
+	return b.String()
+}
 
-	percent := fmt.Sprintf("%.1f%%", m.downloadProg*100)
-	b.WriteString(StatusStyle.Render(percent) + "\n\n")
+func (m Model) renderDownloadItem(d Download) string {
+	var style lipgloss.Style
+	var statusIcon, statusText string
 
-	if m.downloadErr != nil {
-		b.WriteString(ErrorStyle.Render("Error: "+m.downloadErr.Error()) + "\n")
+	switch d.Status {
+	case DownloadPending:
+		style = DownloadItemStyle
+		statusIcon = "○"
+		statusText = "Pending"
+	case DownloadInProgress:
+		style = DownloadActiveStyle
+		statusIcon = "●"
+		statusText = fmt.Sprintf("%.1f%%", d.Progress*100)
+	case DownloadComplete:
+		style = DownloadCompleteStyle
+		statusIcon = "✓"
+		statusText = "Complete"
+	case DownloadFailed:
+		style = DownloadFailedStyle
+		statusIcon = "✗"
+		if d.Error != nil {
+			statusText = "Failed: " + d.Error.Error()
+		} else {
+			statusText = "Failed"
+		}
 	}
 
-	help := HelpStyle.Render("esc: cancel")
-	b.WriteString(help)
+	// Truncate name if too long
+	name := d.Name
+	maxNameLen := m.width - 30
+	if maxNameLen < 20 {
+		maxNameLen = 20
+	}
+	if len(name) > maxNameLen {
+		name = name[:maxNameLen-3] + "..."
+	}
 
-	return lipgloss.Place(
-		m.width, m.height,
-		lipgloss.Center, lipgloss.Center,
-		b.String(),
-	)
+	// Build progress bar for active downloads
+	var progressBar string
+	if d.Status == DownloadInProgress {
+		barWidth := 30
+		filled := int(d.Progress * float64(barWidth))
+		empty := barWidth - filled
+		progressBar = "\n  " + SelectedStyle.Render(strings.Repeat("█", filled)) + DimStyle.Render(strings.Repeat("░", empty))
+	}
+
+	content := fmt.Sprintf("%s %s\n  %s%s", statusIcon, name, DimStyle.Render(statusText), progressBar)
+
+	return style.Width(m.width - 4).Render(content) + "\n"
 }

@@ -11,6 +11,13 @@ import (
 	apiutils "github.com/rshero/stremio-tui/utils"
 )
 
+// Package-level program reference for sending progress updates
+var programRef *tea.Program
+
+func SetProgramRef(p *tea.Program) {
+	programRef = p
+}
+
 // Message types
 type searchResultsMsg struct {
 	results []apiutils.ImdbSearchResult
@@ -29,12 +36,18 @@ type episodesResultsMsg struct {
 }
 
 type downloadProgressMsg struct {
+	id       int
 	progress float64
 }
 
 type downloadCompleteMsg struct {
+	id       int
 	filename string
 	err      error
+}
+
+type downloadStartedMsg struct {
+	id int
 }
 
 type mpvLaunchedMsg struct {
@@ -114,31 +127,38 @@ func downloadStream(url, filename string) tea.Cmd {
 	}
 }
 
-// Download with progress reporting via tea.Program
-func downloadStreamWithProgress(url, filename string, p *tea.Program) tea.Cmd {
+// Download with progress reporting via package-level program reference
+func downloadStreamWithProgress(id int, url, filename string) tea.Cmd {
 	return func() tea.Msg {
+		// Ensure downloads directory exists
+		if err := os.MkdirAll("downloads", 0755); err != nil {
+			return downloadCompleteMsg{id: id, filename: filename, err: err}
+		}
+
 		client := grab.NewClient()
 		req, err := grab.NewRequest(filename, url)
 		if err != nil {
-			return downloadCompleteMsg{filename: filename, err: err}
+			return downloadCompleteMsg{id: id, filename: filename, err: err}
 		}
 
 		resp := client.Do(req)
 
 		// Monitor progress in background
-		ticker := time.NewTicker(100 * time.Millisecond)
+		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
 				progress := resp.Progress()
-				p.Send(downloadProgressMsg{progress: progress})
+				if programRef != nil {
+					programRef.Send(downloadProgressMsg{id: id, progress: progress})
+				}
 			case <-resp.Done:
 				if err := resp.Err(); err != nil {
-					return downloadCompleteMsg{filename: filename, err: err}
+					return downloadCompleteMsg{id: id, filename: filename, err: err}
 				}
-				return downloadCompleteMsg{filename: resp.Filename, err: nil}
+				return downloadCompleteMsg{id: id, filename: resp.Filename, err: nil}
 			}
 		}
 	}

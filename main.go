@@ -16,6 +16,9 @@ func main() {
 		tea.WithMouseCellMotion(),
 	)
 
+	// Set package-level program reference for download progress updates
+	tui.SetProgramRef(p)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running program: %v\n", err)
 		os.Exit(1)

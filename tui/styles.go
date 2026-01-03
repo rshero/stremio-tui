@@ -74,4 +74,43 @@ var (
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(mutedColor).
 			Padding(1, 2)
+
+	// Tab styles
+	TabActiveStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(primaryColor).
+			Foreground(primaryColor).
+			Bold(true).
+			Padding(0, 2)
+
+	TabInactiveStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(mutedColor).
+				Foreground(mutedColor).
+				Padding(0, 2)
+
+	// Download item styles
+	DownloadItemStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(mutedColor).
+				Padding(0, 1).
+				MarginBottom(1)
+
+	DownloadActiveStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(accentColor).
+				Padding(0, 1).
+				MarginBottom(1)
+
+	DownloadCompleteStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(accentColor).
+				Padding(0, 1).
+				MarginBottom(1)
+
+	DownloadFailedStyle = lipgloss.NewStyle().
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(errorColor).
+				Padding(0, 1).
+				MarginBottom(1)
 )
