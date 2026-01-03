@@ -5,8 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	config "github.com/rshero/stremio-tui/config"
+)
+
+const (
+	maxRetries     = 5
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
 )
 
 type ImdbSearchResult struct {
@@ -68,25 +75,50 @@ func ImdbSearch(query string, limit int) []ImdbSearchResult {
 	return response.Titles
 }
 
-func AlcStream(id string) []AlcSearchResult {
+func AlcStream(id string) ([]AlcSearchResult, error) {
 	apiUrl := fmt.Sprintf("%s%s.json", config.ALC_ADDON_URL, id)
-	r, err := http.Get(apiUrl)
-	if err != nil {
-		fmt.Printf("Error making request: %v", err)
-		return []AlcSearchResult{}
-	}
-	defer r.Body.Close()
 
-	var response struct {
-		Titles []AlcSearchResult `json:"streams"`
-	}
-	err = json.NewDecoder(r.Body).Decode(&response)
-	if err != nil {
-		fmt.Printf("Error decoding JSON: %v", err)
-		return []AlcSearchResult{}
+	backoff := initialBackoff
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		r, err := http.Get(apiUrl)
+		if err != nil {
+			return []AlcSearchResult{}, fmt.Errorf("request failed: %v", err)
+		}
+
+		// Handle rate limiting (429)
+		if r.StatusCode == http.StatusTooManyRequests {
+			r.Body.Close()
+			if attempt < maxRetries-1 {
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+			return []AlcSearchResult{}, fmt.Errorf("rate limited (429) after %d retries", maxRetries)
+		}
+
+		// Handle other HTTP errors
+		if r.StatusCode != http.StatusOK {
+			r.Body.Close()
+			return []AlcSearchResult{}, fmt.Errorf("HTTP %d", r.StatusCode)
+		}
+
+		defer r.Body.Close()
+
+		var response struct {
+			Titles []AlcSearchResult `json:"streams"`
+		}
+		err = json.NewDecoder(r.Body).Decode(&response)
+		if err != nil {
+			return []AlcSearchResult{}, fmt.Errorf("decode error: %v", err)
+		}
+
+		return response.Titles, nil
 	}
 
-	return response.Titles
+	return []AlcSearchResult{}, fmt.Errorf("max retries exceeded")
 }
 
 func FetchSeasons(id string) []Season {

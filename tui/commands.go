@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -50,6 +51,12 @@ type downloadStartedMsg struct {
 	id int
 }
 
+type batchStreamResultMsg struct {
+	episode apiutils.Episode
+	streams []apiutils.AlcSearchResult
+	err     error
+}
+
 type mpvLaunchedMsg struct {
 	err error
 }
@@ -66,7 +73,10 @@ func searchIMDB(query string) tea.Cmd {
 
 func fetchStreams(id string) tea.Cmd {
 	return func() tea.Msg {
-		results := apiutils.AlcStream(id)
+		results, err := apiutils.AlcStream(id)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("Failed to fetch streams: %v", err))
+		}
 		return streamsResultsMsg{results: results}
 	}
 }
@@ -90,6 +100,18 @@ func playStream(url string) tea.Cmd {
 		cmd := exec.Command("mpv", url)
 		err := cmd.Start()
 		return mpvLaunchedMsg{err: err}
+	}
+}
+
+func fetchBatchStreams(titleId string, season string, episode apiutils.Episode, delay time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		// Stagger requests to avoid rate limiting
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		streamId := fmt.Sprintf("%s:%s:%d", titleId, season, episode.EpisodeNumber)
+		results, err := apiutils.AlcStream(streamId)
+		return batchStreamResultMsg{episode: episode, streams: results, err: err}
 	}
 }
 
@@ -128,7 +150,7 @@ func downloadStream(url, filename string) tea.Cmd {
 }
 
 // Download with progress reporting via package-level program reference
-func downloadStreamWithProgress(id int, url, filename string) tea.Cmd {
+func downloadStreamWithProgress(id int, url, filename string, cancelChan chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		// Ensure downloads directory exists
 		if err := os.MkdirAll("downloads", 0755); err != nil {
@@ -149,6 +171,12 @@ func downloadStreamWithProgress(id int, url, filename string) tea.Cmd {
 
 		for {
 			select {
+			case <-cancelChan:
+				// Download was cancelled
+				resp.Cancel()
+				// Try to remove partial file
+				os.Remove(filename)
+				return downloadCompleteMsg{id: id, filename: filename, err: fmt.Errorf("cancelled")}
 			case <-ticker.C:
 				progress := resp.Progress()
 				if programRef != nil {

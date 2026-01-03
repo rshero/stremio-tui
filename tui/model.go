@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/progress"
@@ -21,6 +22,8 @@ const (
 	SeasonsView
 	EpisodesView
 	StreamsView
+	BatchInputView
+	BatchSelectView
 )
 
 type Tab int
@@ -37,16 +40,31 @@ const (
 	DownloadInProgress
 	DownloadComplete
 	DownloadFailed
+	DownloadCancelled
 )
 
 type Download struct {
-	ID       int
-	Name     string
-	Filename string
-	URL      string
-	Progress float64
-	Status   DownloadStatus
-	Error    error
+	ID         int
+	Name       string
+	Filename   string
+	URL        string
+	Progress   float64
+	Status     DownloadStatus
+	Error      error
+	CancelChan chan struct{}
+}
+
+// BatchStream represents a stream in batch download selection
+type BatchStream struct {
+	Episode  apiutils.Episode
+	Stream   apiutils.AlcSearchResult
+	Selected bool
+}
+
+// BatchFailure tracks episodes that failed to fetch streams
+type BatchFailure struct {
+	Episode apiutils.Episode
+	Reason  string
 }
 
 // List item implementations
@@ -153,8 +171,16 @@ type Model struct {
 	isFiltering bool
 
 	// Downloads tracking
-	downloads      []Download
-	nextDownloadID int
+	downloads           []Download
+	nextDownloadID      int
+	selectedDownloadIdx int
+
+	// Batch download state
+	batchInput       textinput.Model
+	batchStreams     []BatchStream
+	batchFailed      []BatchFailure // tracks failed episode fetches
+	batchSelectedIdx int
+	batchFetching    int // tracks how many episodes are still being fetched
 
 	// Loading states
 	loading    bool
@@ -235,11 +261,21 @@ func NewModel() Model {
 	fi.TextStyle = NormalStyle
 	fi.PlaceholderStyle = DimStyle
 
+	// Batch download input
+	bi := textinput.New()
+	bi.Placeholder = "e.g. 1080p.BluRay"
+	bi.Width = 40
+	bi.Prompt = "Release name: "
+	bi.PromptStyle = SelectedStyle
+	bi.TextStyle = NormalStyle
+	bi.PlaceholderStyle = DimStyle
+
 	return Model{
 		view:         SearchView,
 		currentTab:   MainTab,
 		searchInput:  ti,
 		filterInput:  fi,
+		batchInput:   bi,
 		resultsList:  resultsList,
 		seasonsList:  seasonsList,
 		episodesList: episodesList,
@@ -299,20 +335,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle tab-specific keys
+		if m.currentTab == DownloadsTab {
+			return m.updateDownloadsTab(msg)
+		}
+
 		// Only process view-specific keys on Main tab
-		if m.currentTab == MainTab {
-			switch m.view {
-			case SearchView:
-				return m.updateSearchView(msg)
-			case ResultsView:
-				return m.updateResultsView(msg)
-			case SeasonsView:
-				return m.updateSeasonsView(msg)
-			case EpisodesView:
-				return m.updateEpisodesView(msg)
-			case StreamsView:
-				return m.updateStreamsView(msg)
-			}
+		switch m.view {
+		case SearchView:
+			return m.updateSearchView(msg)
+		case ResultsView:
+			return m.updateResultsView(msg)
+		case SeasonsView:
+			return m.updateSeasonsView(msg)
+		case EpisodesView:
+			return m.updateEpisodesView(msg)
+		case StreamsView:
+			return m.updateStreamsView(msg)
+		case BatchInputView:
+			return m.updateBatchInputView(msg)
+		case BatchSelectView:
+			return m.updateBatchSelectView(msg)
 		}
 
 	case spinner.TickMsg:
@@ -446,6 +489,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case batchStreamResultMsg:
+		m.batchFetching--
+
+		// Check for fetch error
+		if msg.err != nil {
+			m.batchFailed = append(m.batchFailed, BatchFailure{
+				Episode: msg.episode,
+				Reason:  msg.err.Error(),
+			})
+		} else {
+			// Get the release name filter
+			releaseName := strings.ToLower(m.batchInput.Value())
+
+			// Find streams matching the release name and add them
+			found := false
+			for _, stream := range msg.streams {
+				if strings.Contains(strings.ToLower(stream.Name), releaseName) ||
+					strings.Contains(strings.ToLower(stream.BehaviorHints.Filename), releaseName) {
+					m.batchStreams = append(m.batchStreams, BatchStream{
+						Episode:  msg.episode,
+						Stream:   stream,
+						Selected: true, // Pre-select matching streams
+					})
+					found = true
+					break // Only add first matching stream per episode
+				}
+			}
+
+			// Track as failure if no matching stream found
+			if !found && len(msg.streams) > 0 {
+				m.batchFailed = append(m.batchFailed, BatchFailure{
+					Episode: msg.episode,
+					Reason:  "no match for '" + m.batchInput.Value() + "'",
+				})
+			} else if !found {
+				m.batchFailed = append(m.batchFailed, BatchFailure{
+					Episode: msg.episode,
+					Reason:  "no streams available",
+				})
+			}
+		}
+
+		// When all episodes are fetched, transition to select view
+		if m.batchFetching <= 0 {
+			m.loading = false
+			if len(m.batchStreams) == 0 && len(m.batchFailed) == 0 {
+				m.errorMsg = "No streams found matching '" + m.batchInput.Value() + "'"
+				m.view = EpisodesView
+			} else {
+				m.view = BatchSelectView
+				m.batchSelectedIdx = 0
+			}
+		}
+		return m, nil
+
 	case errorMsg:
 		m.loading = false
 		m.errorMsg = string(msg)
@@ -570,6 +668,14 @@ func (m Model) updateEpisodesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.filterInput.SetValue("")
 		m.filterInput.Focus()
 		return m, textinput.Blink
+	case "b":
+		// Start batch download - enter release name
+		m.view = BatchInputView
+		m.batchInput.SetValue("")
+		m.batchInput.Focus()
+		m.batchStreams = []BatchStream{}
+		m.batchSelectedIdx = 0
+		return m, textinput.Blink
 	case "esc":
 		// Reset filter state for episodes view
 		m.episodesList.SetItems(m.allEpisodeItems)
@@ -590,6 +696,117 @@ func (m Model) updateEpisodesView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.episodesList, cmd = m.episodesList.Update(msg)
 	return m, cmd
+}
+
+func (m Model) updateBatchInputView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.view = EpisodesView
+		m.batchInput.Blur()
+		return m, nil
+	case "enter":
+		releaseName := strings.TrimSpace(m.batchInput.Value())
+		if releaseName == "" {
+			m.errorMsg = "Please enter a release name"
+			return m, nil
+		}
+		m.batchInput.Blur()
+		m.loading = true
+		m.loadingMsg = "Fetching streams for all episodes..."
+		m.batchStreams = []BatchStream{}
+		m.batchFailed = []BatchFailure{}
+		m.batchFetching = len(m.episodes)
+
+		// Start fetching streams for all episodes with staggered delays
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.spinner.Tick)
+		for i, ep := range m.episodes {
+			// Stagger requests by 5s each to avoid rate limiting
+			delay := time.Duration(i) * 5 * time.Second
+			cmds = append(cmds, fetchBatchStreams(m.selectedTitle.Id, m.selectedSeason.Season, ep, delay))
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	var cmd tea.Cmd
+	m.batchInput, cmd = m.batchInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateBatchSelectView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.view = EpisodesView
+		return m, nil
+	case "j", "down":
+		if len(m.batchStreams) > 0 && m.batchSelectedIdx < len(m.batchStreams)-1 {
+			m.batchSelectedIdx++
+		}
+		return m, nil
+	case "k", "up":
+		if m.batchSelectedIdx > 0 {
+			m.batchSelectedIdx--
+		}
+		return m, nil
+	case " ":
+		// Toggle selection
+		if len(m.batchStreams) > 0 && m.batchSelectedIdx < len(m.batchStreams) {
+			m.batchStreams[m.batchSelectedIdx].Selected = !m.batchStreams[m.batchSelectedIdx].Selected
+		}
+		return m, nil
+	case "a":
+		// Select all
+		for i := range m.batchStreams {
+			m.batchStreams[i].Selected = true
+		}
+		return m, nil
+	case "n":
+		// Select none
+		for i := range m.batchStreams {
+			m.batchStreams[i].Selected = false
+		}
+		return m, nil
+	case "enter":
+		// Start downloading all selected
+		var cmds []tea.Cmd
+		for _, bs := range m.batchStreams {
+			if !bs.Selected {
+				continue
+			}
+			// Create filename
+			var filename string
+			if bs.Stream.BehaviorHints.Filename != "" {
+				filename = bs.Stream.BehaviorHints.Filename
+			} else {
+				filename = sanitizeFilename(fmt.Sprintf("S%sE%02d_%s", m.selectedSeason.Season, bs.Episode.EpisodeNumber, bs.Stream.Name))
+			}
+			filepath := "downloads/" + filename
+
+			// Add to downloads list
+			cancelChan := make(chan struct{})
+			download := Download{
+				ID:         m.nextDownloadID,
+				Name:       fmt.Sprintf("S%sE%02d: %s", m.selectedSeason.Season, bs.Episode.EpisodeNumber, bs.Stream.Name),
+				Filename:   filepath,
+				URL:        bs.Stream.Url,
+				Progress:   0,
+				Status:     DownloadPending,
+				CancelChan: cancelChan,
+			}
+			m.downloads = append(m.downloads, download)
+			cmds = append(cmds, downloadStreamWithProgress(download.ID, bs.Stream.Url, filepath, cancelChan))
+			m.nextDownloadID++
+		}
+
+		if len(cmds) > 0 {
+			m.statusMsg = fmt.Sprintf("Started %d downloads - press Tab to view", len(cmds))
+		} else {
+			m.statusMsg = "No streams selected"
+		}
+		m.view = EpisodesView
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
 }
 
 func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -669,13 +886,15 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			filepath := "downloads/" + filename
 
 			// Add to downloads list
+			cancelChan := make(chan struct{})
 			download := Download{
-				ID:       m.nextDownloadID,
-				Name:     item.result.Name,
-				Filename: filepath,
-				URL:      item.result.Url,
-				Progress: 0,
-				Status:   DownloadPending,
+				ID:         m.nextDownloadID,
+				Name:       item.result.Name,
+				Filename:   filepath,
+				URL:        item.result.Url,
+				Progress:   0,
+				Status:     DownloadPending,
+				CancelChan: cancelChan,
 			}
 			m.downloads = append(m.downloads, download)
 			m.nextDownloadID++
@@ -684,13 +903,44 @@ func (m Model) updateStreamsView(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.errorMsg = ""
 
 			// Start download in background with progress reporting
-			return m, downloadStreamWithProgress(download.ID, item.result.Url, filepath)
+			return m, downloadStreamWithProgress(download.ID, item.result.Url, filepath, cancelChan)
 		}
 	}
 
 	var cmd tea.Cmd
 	m.streamsList, cmd = m.streamsList.Update(msg)
 	return m, cmd
+}
+
+func (m Model) updateDownloadsTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.currentTab = MainTab
+		return m, nil
+	case "j", "down":
+		if len(m.downloads) > 0 && m.selectedDownloadIdx < len(m.downloads)-1 {
+			m.selectedDownloadIdx++
+		}
+		return m, nil
+	case "k", "up":
+		if m.selectedDownloadIdx > 0 {
+			m.selectedDownloadIdx--
+		}
+		return m, nil
+	case "x":
+		// Cancel selected download
+		if len(m.downloads) > 0 && m.selectedDownloadIdx < len(m.downloads) {
+			d := &m.downloads[m.selectedDownloadIdx]
+			if d.Status == DownloadPending || d.Status == DownloadInProgress {
+				d.Status = DownloadCancelled
+				if d.CancelChan != nil {
+					close(d.CancelChan)
+				}
+			}
+		}
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m Model) View() string {
@@ -711,6 +961,10 @@ func (m Model) View() string {
 			content = m.episodesView()
 		case StreamsView:
 			content = m.streamsView()
+		case BatchInputView:
+			content = m.batchInputView()
+		case BatchSelectView:
+			content = m.batchSelectView()
 		}
 	}
 

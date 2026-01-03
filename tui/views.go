@@ -125,7 +125,7 @@ func (m Model) episodesView() string {
 	if m.isFiltering {
 		help = HelpStyle.Render("enter: apply filter • esc: cancel filter")
 	} else {
-		help = HelpStyle.Render("enter: select • /: filter • esc: back • j/k: navigate • q: quit")
+		help = HelpStyle.Render("enter: select • b: batch download • /: filter • esc: back")
 	}
 	b.WriteString(help)
 
@@ -206,10 +206,7 @@ func (m Model) renderTabBar() string {
 		downloadsTab = TabActiveStyle.Render(downloadsLabel)
 	}
 
-	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, mainTab, " ", downloadsTab)
-	help := HelpStyle.Render("  tab: switch • q: back/quit • ctrl+c: quit")
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, tabBar, help)
+	return lipgloss.JoinHorizontal(lipgloss.Top, mainTab, " ", downloadsTab, HelpStyle.Render("  tab: switch"))
 }
 
 func (m Model) downloadsPageView() string {
@@ -221,15 +218,143 @@ func (m Model) downloadsPageView() string {
 	if len(m.downloads) == 0 {
 		b.WriteString(DimStyle.Render("No downloads yet. Press 'd' on a stream to start downloading.") + "\n")
 	} else {
-		for _, d := range m.downloads {
-			b.WriteString(m.renderDownloadItem(d))
+		for i, d := range m.downloads {
+			isSelected := i == m.selectedDownloadIdx
+			b.WriteString(m.renderDownloadItem(d, isSelected))
 		}
 	}
 
-	return b.String()
+	b.WriteString("\n")
+	help := HelpStyle.Render("j/k: navigate • x: cancel download • esc/q: back to main")
+	b.WriteString(help)
+
+	// Use consistent height with other views
+	content := b.String()
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height - 4). // Reserve space for tab bar
+		Render(content)
 }
 
-func (m Model) renderDownloadItem(d Download) string {
+func (m Model) batchInputView() string {
+	var b strings.Builder
+
+	if m.loading {
+		loading := m.spinner.View() + " " + m.loadingMsg
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			loading,
+		)
+	}
+
+	title := TitleStyle.Render("Batch Download")
+	b.WriteString(title + "\n\n")
+
+	// Show selected title and season
+	if m.selectedTitle != nil && m.selectedSeason != nil {
+		titleInfo := DimStyle.Render(fmt.Sprintf("%s - Season %s (%d episodes)", m.selectedTitle.PrimaryTitle, m.selectedSeason.Season, len(m.episodes)))
+		b.WriteString(titleInfo + "\n\n")
+	}
+
+	b.WriteString(SubtitleStyle.Render("Enter release name to filter streams:") + "\n\n")
+	b.WriteString(InputStyle.Render(m.batchInput.View()) + "\n\n")
+
+	if m.errorMsg != "" {
+		b.WriteString(ErrorStyle.Render(m.errorMsg) + "\n\n")
+	}
+
+	help := HelpStyle.Render("enter: search streams • esc: cancel")
+	b.WriteString(help)
+
+	return lipgloss.Place(
+		m.width, m.height-4,
+		lipgloss.Center, lipgloss.Center,
+		b.String(),
+	)
+}
+
+func (m Model) batchSelectView() string {
+	var b strings.Builder
+
+	title := TitleStyle.Render("Select Streams to Download")
+	b.WriteString(title + "\n\n")
+
+	// Show selected title and season
+	if m.selectedTitle != nil && m.selectedSeason != nil {
+		titleInfo := DimStyle.Render(fmt.Sprintf("%s - Season %s", m.selectedTitle.PrimaryTitle, m.selectedSeason.Season))
+		b.WriteString(titleInfo + "\n")
+		b.WriteString(DimStyle.Render(fmt.Sprintf("Filter: %s", m.batchInput.Value())) + "\n\n")
+	}
+
+	// Count selected
+	selectedCount := 0
+	for _, bs := range m.batchStreams {
+		if bs.Selected {
+			selectedCount++
+		}
+	}
+	b.WriteString(StatusStyle.Render(fmt.Sprintf("%d of %d selected", selectedCount, len(m.batchStreams))) + "\n\n")
+
+	// Show streams with checkboxes
+	for i, bs := range m.batchStreams {
+		isSelected := i == m.batchSelectedIdx
+		b.WriteString(m.renderBatchStreamItem(bs, isSelected))
+	}
+
+	// Show failed episodes if any
+	if len(m.batchFailed) > 0 {
+		b.WriteString("\n" + ErrorStyle.Render(fmt.Sprintf("Failed to fetch %d episode(s):", len(m.batchFailed))) + "\n")
+		for _, failure := range m.batchFailed {
+			failInfo := fmt.Sprintf("  E%02d: %s", failure.Episode.EpisodeNumber, failure.Reason)
+			b.WriteString(DimStyle.Render(failInfo) + "\n")
+		}
+	}
+
+	if m.errorMsg != "" {
+		b.WriteString(ErrorStyle.Render(m.errorMsg) + "\n")
+	}
+
+	help := HelpStyle.Render("space: toggle • a: all • n: none • enter: start downloads • esc: cancel")
+	b.WriteString("\n" + help)
+
+	// Use consistent height
+	content := b.String()
+	return lipgloss.NewStyle().
+		Width(m.width).
+		Height(m.height - 4).
+		Render(content)
+}
+
+func (m Model) renderBatchStreamItem(bs BatchStream, isSelected bool) string {
+	checkbox := "[ ]"
+	if bs.Selected {
+		checkbox = "[✓]"
+	}
+
+	selector := "  "
+	nameStyle := NormalStyle
+	if isSelected {
+		selector = "› "
+		nameStyle = SelectedStyle
+	}
+
+	// Truncate name if too long
+	name := bs.Stream.Name
+	maxNameLen := m.width - 40
+	if maxNameLen < 20 {
+		maxNameLen = 20
+	}
+	if len(name) > maxNameLen {
+		name = name[:maxNameLen-3] + "..."
+	}
+
+	episodeInfo := fmt.Sprintf("E%02d", bs.Episode.EpisodeNumber)
+
+	return fmt.Sprintf("%s%s %s %s\n", selector, checkbox, DimStyle.Render(episodeInfo), nameStyle.Render(name))
+}
+
+func (m Model) renderDownloadItem(d Download, isSelected bool) string {
 	var style lipgloss.Style
 	var statusIcon, statusText string
 
@@ -254,6 +379,10 @@ func (m Model) renderDownloadItem(d Download) string {
 		} else {
 			statusText = "Failed"
 		}
+	case DownloadCancelled:
+		style = DownloadFailedStyle
+		statusIcon = "⊘"
+		statusText = "Cancelled"
 	}
 
 	// Truncate name if too long
@@ -275,7 +404,14 @@ func (m Model) renderDownloadItem(d Download) string {
 		progressBar = "\n  " + SelectedStyle.Render(strings.Repeat("█", filled)) + DimStyle.Render(strings.Repeat("░", empty))
 	}
 
-	content := fmt.Sprintf("%s %s\n  %s%s", statusIcon, name, DimStyle.Render(statusText), progressBar)
+	// Selection indicator
+	selector := "  "
+	if isSelected {
+		selector = "› "
+		style = style.BorderForeground(lipgloss.Color("#7C3AED")) // primary color for selected
+	}
+
+	content := fmt.Sprintf("%s%s %s\n   %s%s", selector, statusIcon, name, DimStyle.Render(statusText), progressBar)
 
 	return style.Width(m.width - 4).Render(content) + "\n"
 }
