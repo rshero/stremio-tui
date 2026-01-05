@@ -2,6 +2,8 @@
 
 Terminal UI for searching and streaming content via Stremio addons.
 
+<img src="https://raw.githubusercontent.com/rshero/stremio-tui/refs/heads/master/demo.gif" alt="Demo" height="512" />
+
 ## Requirements
 
 - Go 1.21+
